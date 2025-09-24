@@ -2,6 +2,7 @@ structure PolyMLB :
 sig
   datatype opt =
     AnnDefaults of Ann.t list
+  | Cache of Cache.t
   | Concurrency of { depsFirst : bool, jobs : int }
     (* dummy values can be used; the anns will be completely disabled *)
   | DisabledAnns of Ann.t list
@@ -41,6 +42,7 @@ struct
 
   datatype opt =
     AnnDefaults of Ann.t list
+  | Cache of Cache.t
   | Concurrency of { depsFirst : bool, jobs : int }
   | DisabledAnns of Ann.t list
   | Logger of Log.logger
@@ -83,6 +85,7 @@ struct
         fun fd f v = find f opts v
       in
         { anns     = fd (fn AnnDefaults l => SOME l | _ => NONE) []
+        , cache    = fd (fn Cache c => SOME (SOME c) | _ => NONE) NONE
         , conc     = fd (fn Concurrency z => SOME z | _ => NONE)
             { depsFirst = false, jobs = 1 }
         , dAnns    = fd (fn DisabledAnns l => SOME l | _ => NONE) []
@@ -95,7 +98,7 @@ struct
 
   fun doBasis f opts src =
     let
-      val opts as { conc, logger, ... } = doOpts opts
+      val opts as { cache, conc, logger, ... } = doOpts opts
       val copts =
         { depsFirst = #depsFirst conc, jobs = #jobs conc, logger = logger }
 
@@ -178,6 +181,7 @@ structure PolyMLB =
 struct
   structure Ann = Ann
   structure Basis = Basis
+  structure Cache = Cache
   structure Compile = Compile
   structure Dag = Dag
   structure Lex = Lex

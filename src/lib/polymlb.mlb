@@ -8,8 +8,9 @@ local
   Ann.sml
   Path.sml
   Basis.sml
-  Dag.sml
   NameSpace.sml
+  Cache.sml
+  Dag.sml
   Compile.sml
 in
   PolyMLB.sml

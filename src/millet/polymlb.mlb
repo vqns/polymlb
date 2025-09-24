@@ -8,8 +8,9 @@ local
   $(ROOT)/Ann.sml
   $(ROOT)/Path.sml
   $(ROOT)/Basis.sml
-  $(ROOT)/Dag.sml
   $(ROOT)/NameSpace.sml
+  $(ROOT)/Cache.sml
+  $(ROOT)/Dag.sml
   $(ROOT)/Compile.sml
 in
   $(ROOT)/PolyMLB.sml
