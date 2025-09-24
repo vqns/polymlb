@@ -11,6 +11,7 @@ sig
     , full  : dag
     , bases : Basis.t vector
     , paths : string vector
+    , dirty : BoolVector.vector
       (* raises on invalid path *)
     , getId : string -> int
     }
@@ -22,7 +23,8 @@ sig
   val errToString : (string -> string) -> err -> string
 
   type opts =
-    { logger : Log.logger option
+    { cache  : Cache.t option
+    , logger : Log.logger option
     , reduce : bool
     }
 
@@ -43,6 +45,7 @@ struct
   structure BA = BoolArray
   structure H  = HashArray
   structure L  = List
+  structure T  = Time
   structure V  = Vector
 
   datatype node = N of int * node vector
@@ -54,6 +57,7 @@ struct
     , full  : dag
     , bases : Basis.t vector
     , paths : string vector
+    , dirty : BoolVector.vector
     , getId : string -> int
     }
 
@@ -66,7 +70,8 @@ struct
       ("error: mlb cycle:\n" :: List.concat (map (fn s => ["  ", s, "\n"]) l))
 
   type opts =
-    { logger : Log.logger option
+    { cache  : Cache.t option
+    , logger : Log.logger option
     , reduce : bool
     }
 
@@ -154,6 +159,37 @@ struct
     val clear = BA.modify (fn _ => false)
   end
 
+  structure DynSet :>
+  sig
+    type t
+    val new : int -> t
+    val sub : t * int -> bool
+    val set : t * int -> unit
+    val vec : t * int -> BoolVector.vector
+  end =
+  struct
+    type t = BA.array ref
+
+    fun new i = (ref o BA.array) (i, false)
+
+    fun sub (ref a, i) = i < BA.length a andalso BA.sub (a, i)
+
+    fun set (r, i) =
+      ( if i >= BA.length (!r) then
+          let
+            val a = BA.array (Int.max (BA.length (!r) * 2, i + 1), false)
+          in
+            BA.copy { src = !r, dst = a, di = 0 };
+            r := a
+          end
+        else
+          ()
+      ; BA.update (!r, i, true)
+      )
+
+    fun vec (ref a, i) = BoolVector.tabulate (i, fn i => BA.sub (a, i))
+  end
+
   structure Matrix :>
   sig
     type t
@@ -176,6 +212,7 @@ struct
   end
 
   structure B = Buffer
+  structure D = DynSet
   structure S = Set
   structure M = Matrix
 
@@ -187,6 +224,17 @@ struct
       idx (l, 0)
     end
 
+  fun mtime (h, p) =
+    case H.sub (h, p) of
+      SOME t => t
+    | NONE =>
+        let
+          val t = OS.FileSys.modTime p handle _ => T.now ()
+        in
+          H.update (h, p, t);
+          t
+        end
+
   datatype z = datatype Basis.dec
   datatype z = datatype Basis.exp
 
@@ -195,15 +243,76 @@ struct
   (* Depth first so that any cycle found is the first one when reading
    * sequentially from the root.
    *)
-  fun traverse (getBas, root) =
+  fun traverse (cache : Cache.t option, log, getBas, root) =
     let
       val bases : Basis.t B.t = B.new (baseSize * 2, [])
       val paths : string B.t = B.new (baseSize * 2, "")
+      val dirty = D.new (baseSize * 2)
+      val times : T.time B.t = B.new (baseSize * 2, T.now ())
+      val mods  : T.time H.hash = H.hash (baseSize * 4)
       val ids   : int H.hash = H.hash (baseSize * 2)
       val deps  = B.new (baseSize, B.new (0, ~1))
       val revs  = B.new (baseSize, B.new (0, ~1))
 
-      fun dec ([], _, _, _) = ()
+      val op > = T.>
+
+      fun doBas (p, ps) =
+        let
+          val ds = getBas p
+          val id = B.cnt bases
+          val sz = Int.max (id + 1, baseSize)
+        in
+          (* Check if basis is in cache and up to date. *)
+          case cache of
+            NONE => D.set (dirty, id)
+          | SOME { time, ... } =>
+              let
+                val t = getOpt (time p, T.zeroTime)
+                val t' = mtime (mods, p)
+              in
+                if t' > t then
+                  D.set (dirty, id)
+                else
+                  B.set (times, id, t)
+              end;
+          (* Update bases, ids, etc. *)
+          H.update (ids, p, id);
+          B.add (paths, p);
+          B.add (deps, B.new (sz, ~1));
+          B.add (revs, B.new (sz, ~1));
+          B.add (bases, ds);
+          (* Traverse declarations. *)
+          dec (ds, id, p::ps, []);
+          (* Update with new basis content if dirty. *)
+          case cache of
+            NONE => ()
+          | SOME { hasOrSet, set, ... } =>
+              let
+                val d = B.sub (deps, id)
+                val z =
+                  { id   = p
+                  , bas  = ds
+                  , deps = V.tabulate (B.cnt d, fn i => B.sub (paths, i))
+                  }
+              in
+                (* If already dirty, update the cache. *)
+                if D.sub (dirty, id) then
+                  set z
+                (* Else check that the cache contains the exact same basis.
+                 * If not, then update cache (during the check) and set dirty.
+                 *)
+                else if (not o hasOrSet) z then
+                  D.set (dirty, id)
+                else
+                  ();
+                Log.log log Log.Trace (fn fmt =>
+                  fmt p ^ (if D.sub (dirty, id) then ": dirty" else ": clean"))
+              end;
+          (* Return the id. *)
+          id
+        end
+
+      and dec ([], _, _, _) = ()
         | dec (Basis (_, e) :: ds, id, ps, is) =
             (exp (e, id, ps, is); dec (ds, id, ps, is))
         | dec (BasisFile p :: ds, id, ps, is) =
@@ -217,30 +326,30 @@ struct
                       (case index (ps, p) of
                         ~1 => id
                       | i => raise (Dag o Cycle) (p :: (rev o L.take) (ps, i)))
-                  | NONE =>
-                      let
-                        val ds' = getBas p
-                        val id' = B.cnt bases
-                      in
-                        H.update (ids, p, id');
-                        B.add (paths, p);
-                        B.add (deps, B.new (id' + 1, ~1));
-                        B.add (revs, B.new (id' + 1, ~1));
-                        B.add (bases, ds');
-                        dec (ds', id', p::ps, []);
-                        id'
-                      end
+                  | NONE => doBas (p, ps)
               in
+                (* Set dirty if dep is dirty. *)
+                if D.sub (dirty, id') then (D.set (dirty, id)) else ();
                 B.addIfAbsent op= (B.sub (deps, id), id');
                 B.addIfAbsent op= (B.sub (revs, id'), id);
                 dec (ds, id, ps, is)
               end
+        | dec (SourceFile p :: ds, id, ps, is) =
+            ( if not (L.exists (fn p' => p = p') is)
+                andalso (not o D.sub) (dirty, id)
+                andalso mtime (mods, p) > B.sub (times, id)
+              then
+                (D.set (dirty, id))
+              else
+                ()
+            ; dec (ds, id, ps, is)
+            )
         | dec (Ann (l, ds') :: ds, id, ps, is) =
             ( if Ann.exists Ann.Discard l then
                 ()
               else
                 dec (ds', id, ps,
-                  L.foldl
+                  foldl
                     (fn (Ann.IgnoreFiles f, fs) => f @ fs | (_, fs) => fs)
                     is l)
             ; dec (ds, id, ps, is)
@@ -253,17 +362,12 @@ struct
         | exp (Let (ds, e), id, ps, is) = (dec (ds, id, ps, is); exp (e, id, ps, is))
         | exp (Id _, _, _, _) = ()
 
-      val bas = getBas root
     in
-      H.update (ids, root, 0);
-      B.set (bases, 0, bas);
-      B.set (paths, 0, root);
-      B.set (deps, 0, B.new (baseSize, ~1));
-      B.set (revs, 0, B.new (baseSize, ~1));
-      dec (bas, 0, [root], []);
+      doBas (root, [root]);
 
       { bases = B.vec bases
       , paths = B.vec paths
+      , dirty = D.vec (dirty, B.cnt bases)
       , ids   = ids
       , deps  = deps
       , revs  = revs
@@ -407,13 +511,15 @@ struct
       end
   end
 
-  fun process { logger, reduce = red } f s =
+  fun process { cache, logger, reduce = red } f s =
     let
       val log = Log.log logger Log.Debug
       fun parse s = (log (fn fmt => "parsing " ^ fmt s); f s)
 
-      val { bases, paths, ids, deps, revs } =
-        (log (fn _ => "traversing MLB graph"); traverse (parse, s))
+      val { bases, paths, dirty, ids, deps, revs } =
+        ( log (fn _ => "traversing MLB graph")
+        ; traverse (cache, logger, parse, s)
+        )
       val bs = { sz = V.length bases, deps = deps, revs = revs }
       val full = (log (fn _ => "building MLBgraph"); mkDag bs)
       val dag =
@@ -430,6 +536,7 @@ struct
       , full  = full
       , bases = bases
       , paths = paths
+      , dirty = dirty
       , getId = fn s => (valOf o H.sub) (ids, s)
       }
     end

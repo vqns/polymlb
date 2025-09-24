@@ -140,7 +140,7 @@ struct
         ) p
     in
       ( f copts
-      o Dag.process { logger = logger, reduce = true } mkBas
+      o Dag.process { cache = cache, logger = logger, reduce = true } mkBas
       ) src
       handle e =>
         ( Log.log logger Log.Error

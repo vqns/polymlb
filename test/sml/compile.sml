@@ -5,7 +5,7 @@ datatype z = datatype PolyMLB.Basis.dec
 
 fun compile b () = C.compile
   { depsFirst = false, jobs = 0, logger = NONE }
-  (PolyMLB.Dag.process { logger = NONE, reduce = true }
+  (PolyMLB.Dag.process { cache = NONE, logger = NONE, reduce = true }
     (fn "root" => [Ann ([PolyMLB.Ann.ImportAll], b)]
       | _ => raise Fail "")
     "root");
@@ -31,7 +31,7 @@ raisesExact
 fun compile b = C.compile
   { depsFirst = false, jobs = 0, logger = NONE }
   (PolyMLB.Dag.process
-    { logger = NONE, reduce = true }
+    { cache = NONE, logger = NONE, reduce = true }
     (fn "root" => [Ann ([PolyMLB.Ann.ImportAll], b)]
       | _ => raise Fail "")
     "root");
