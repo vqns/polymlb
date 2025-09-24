@@ -100,7 +100,11 @@ struct
     let
       val opts as { cache, conc, logger, ... } = doOpts opts
       val copts =
-        { depsFirst = #depsFirst conc, jobs = #jobs conc, logger = logger }
+        { cache     = cache
+        , depsFirst = #depsFirst conc
+        , jobs      = #jobs conc
+        , logger    = logger
+        }
 
       val src = OSF.fullPath src
         handle e =>

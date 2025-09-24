@@ -11,7 +11,8 @@ sig
   val errToString : (string -> string) -> err -> string
 
   type opts =
-    { depsFirst : bool
+    { cache     : Cache.t option
+    , depsFirst : bool
     , jobs      : int
     , logger    : Log.logger option
     }
@@ -27,6 +28,7 @@ end =
 struct
   structure A    = Array
   structure BA   = BoolArray
+  structure BV   = BoolVector
   structure D    = Dag
   structure FTP  = ThreadPools.FTP
   structure H    = HashArray
@@ -63,7 +65,8 @@ struct
       ]
 
   type opts =
-    { depsFirst : bool
+    { cache     : Cache.t option
+    , depsFirst : bool
     , jobs      : int
     , logger    : Log.logger option
     }
@@ -272,9 +275,57 @@ struct
       end
   end
 
-  (* All driver functions are passed in a namespace array, which will contain
-   * the namespaces resulting from MLB elaboration and is indexed by dag ids.
+  (* All driver functions are passed in a cache manager as well as a namespace
+   * array, which will contain the namespaces resulting from MLB elaboration
+   * and is indexed by dag ids.
    *)
+
+  structure CacheManager :>
+  sig
+    type t
+    val new : Cache.t option * L.logger option * D.t -> t
+    val fetch : t * int -> NS.t option
+    val store : t * int * NS.t -> NS.t
+  end =
+  struct
+    type t =
+      { cache : Cache.t
+      , log   : L.logger option
+      , paths : string vector
+      , dirty : BV.vector
+      } option
+
+    fun new (NONE, _, _) = NONE
+      | new (SOME c, l, { paths, dirty, ... } : D.t) =
+          SOME { cache = c, log   = l, paths = paths, dirty = dirty }
+
+    fun fetch (NONE : t, _) = NONE
+      | fetch (SOME { cache = { fetch, ... }, log, dirty, paths }, id) =
+          if BV.sub (dirty, id) then
+            NONE
+          else
+            let
+              val p = V.sub (paths, id)
+            in
+              L.log log L.Debug (fn fmt => "fetching " ^ fmt p ^ " from cache");
+              (fetch o V.sub) (paths, id)
+            end
+
+    fun store (NONE : t, _, ns) = ns
+      | store (SOME { cache = { store, ... }, log, dirty, paths }, id, ns) =
+          (* Cache the namespace only if it's new *)
+          if (not o BV.sub) (dirty, id) then
+            ns
+          else
+            let
+              val p = V.sub (paths, id)
+            in
+              L.log log L.Debug (fn fmt => "caching " ^ fmt p);
+              case store (V.sub (paths, id), Time.now (), ns) of
+                SOME ns => ns
+              | _ => ns
+            end
+  end
 
   structure NameSpaceArray :>
   sig
@@ -324,33 +375,42 @@ struct
         A.update (a, i, SOME ns) before unlock m
   end
 
+  structure CM  = CacheManager
   structure NSA = NameSpaceArray
 
   fun logElab log p = L.log log L.Info (fn fmt => "elaborating " ^ fmt p)
 
   (* Driver functions. *)
 
-  fun serialDeps (log, nsa, { dag = { root, ... }, bases, paths, ... } : D.t) =
+  fun serialDeps (cm, log, nsa, { full, bases, paths, ... } : D.t) =
     let
-      fun cont (Done (id, ns)) = NSA.set (nsa, id, ns)
+      fun cont (Done (id, ns)) = NSA.set (nsa, id, CM.store (cm, id, ns))
         | cont (Cont (_, p, f)) = (cont o f o NSA.sub') (nsa, p)
 
       fun comp (D.N (id, deps)) =
         if (isSome o NSA.get) (nsa, id) then
           ()
         else
-          ( V.app comp deps
-          ; (logElab log o V.sub) (paths, id)
-          ; (cont o compileBas log id o V.sub) (bases, id)
-          )
+          case CM.fetch (cm, id) of
+            SOME ns => NSA.set (nsa, id, ns)
+          | NONE =>
+              ( V.app comp deps
+              ; (logElab log o V.sub) (paths, id)
+              ; (cont o compileBas log id o V.sub) (bases, id)
+              )
      in
-      comp root;
+      comp (#root full);
       NSA.sub (nsa, 0)
     end
 
-  fun serialEncounter (log, nsa, { bases, paths, getId, ... } : D.t) =
+  fun serialEncounter (cm, log, nsa, { bases, paths, getId, ... } : D.t) =
     let
-      fun cont (Done (id, ns)) = ns before NSA.set (nsa, id, ns)
+      fun cont (Done (id, ns)) =
+            let
+              val ns = CM.store (cm, id, ns)
+            in
+              ns before NSA.set (nsa, id, ns)
+            end
         | cont (Cont (_, p, f)) =
             let
               val id = getId p
@@ -358,16 +418,20 @@ struct
               case NSA.get (nsa, id) of
                 SOME ns => cont (f ns)
               | NONE =>
-                  ( logElab log p
-                  ; (cont o f o cont o compileBas log id o V.sub) (bases, id)
-                  )
+                  case CM.fetch (cm, id) of
+                    SOME ns => cont (f ns)
+                  | NONE =>
+                      ( logElab log p
+                      ; (cont o f o cont o compileBas log id o V.sub)
+                          (bases, id)
+                      )
             end
     in
       (logElab log o V.sub) (paths, 0);
       (cont o compileBas log 0 o V.sub) (bases, 0)
     end
 
-  fun parDeps jobs (log, nsa, { dag = { root, leaves }, bases, paths, ... } : D.t) =
+  fun parDeps jobs (cm, log, nsa, { full, bases, paths, dirty, ... } : D.t) =
     let
       val started = BA.array (V.length bases, false)
       val counts  = A.tabulate (V.length bases, fn _ => (M.mutex (), ref ~1))
@@ -380,7 +444,7 @@ struct
           if !r > ~1 then () else (r := V.length deps; V.app doCounts deps)
         end
 
-      fun cont (Done (id, ns)) = NSA.set (nsa, id, ns)
+      fun cont (Done (id, ns)) = NSA.set (nsa, id, CM.store (cm, id, ns))
         | cont (Cont (_, p, f)) = (cont o f o NSA.sub') (nsa, p)
 
       fun elab id =
@@ -394,29 +458,44 @@ struct
         in
           M.lock m;
           r := !r - 1;
-          if !r = 0 before M.unlock m then
+          if !r <= 0 before M.unlock m then
             FTP.submit (tp, fn () => comp n)
           else
             ()
         end
 
-      (* no lock on started since it's only accessed from the original thread *)
+      (* No lock on started since it's only accessed from the original thread. *)
       and comp (D.N (id, revs)) =
         if BA.sub (started, id) then
           ()
         else
           ( BA.update (started, id, true)
-          ; FTP.submit (tp, fn () => (elab id; V.app postComp revs))
+          ; if BV.sub (dirty, id) then
+              (* If dirty, then submit elab job. *)
+              FTP.submit (tp, fn () => (elab id; V.app postComp revs))
+            else if V.exists (fn D.N (i, _) => BV.sub (dirty, i)) revs then
+              (* Else if any of the revdeps is dirty, then attempt to fetch
+               * from cache.
+               *)
+              FTP.submit
+                (tp, fn () =>
+                  ( case CM.fetch (cm, id) of
+                      SOME ns => NSA.set (nsa, id, ns)
+                    | NONE => elab id
+                  ; V.app postComp revs
+                  ))
+            else
+              V.app postComp revs
           )
     in
-      doCounts root;
-      V.app comp leaves;
+      doCounts (#root full);
+      V.app comp (#leaves full);
       case FTP.wait tp of
         NONE => NSA.sub (nsa, 0)
       | SOME e => PolyML.Exception.reraise e
     end
 
-  fun parConc jobs (log, nsa, { dag = { root, leaves }, bases, paths, getId, ... } : D.t) =
+  fun parConc jobs (cm, log, nsa, { full, bases, paths, dirty, getId, ... } : D.t) =
     let
       type c    = FixedInt.int * (FixedInt.int * int) cont
       val m     = M.mutex ()
@@ -436,7 +515,7 @@ struct
               ()
         end
 
-      fun cont (Done ((_, id), ns)) = (NSA.set (nsa, id, ns); postComp (id, ns))
+      fun cont (Done ((_, id), ns)) = postComp (id, CM.store (cm, id, ns))
         | cont (Cont ((prio, _), p, f)) =
             let
               val id = getId p
@@ -451,29 +530,43 @@ struct
             end
 
       and postComp (id, ns) =
-        app
-          (fn (prio, f) => PTP.submit (tp, (prio, fn () => cont (f ns))))
-          (A.sub (conts, id))
+        ( NSA.set (nsa, id, ns)
+        ; app
+            (fn (prio, f) => PTP.submit (tp, (prio, fn () => cont (f ns))))
+            (A.sub (conts, id))
+        )
 
-     fun elab (prio, id) =
+      fun elab (prio, id) =
         ( (logElab log o V.sub) (paths, id)
         ; (cont o compileBas log (prio, id) o V.sub) (bases, id)
         )
 
-      (* no lock on prios since it's only accessed from the original thread *)
+      (* No lock on prios since it's only accessed from the original thread. *)
       fun comp (D.N (id, revs)) =
         case A.sub (prios, id) of
           ~1 => ()
         | prio =>
             ( A.update (prios, id, ~1)
-            ; PTP.submit (tp, (prio, fn () => elab (prio, id)))
+            ; if BV.sub (dirty, id) then
+                (* If dirty, then submit elab job. *)
+                PTP.submit (tp, (prio, fn () => elab (prio, id)))
+              else if V.exists (fn D.N (i, _) => BV.sub (dirty, i)) revs then
+                (* Else if any of the revdeps is dirty, then attempt to fetch
+                 * from cache.
+                 *)
+                PTP.submit (tp, (prio, fn () =>
+                  case CM.fetch (cm, id) of
+                    SOME ns => postComp (id, ns)
+                  | NONE => elab (prio, id)))
+              else
+                ()
             ; V.app comp revs
             )
     in
-      doPrio 0 root;
-      V.app comp leaves;
+      doPrio 0 (#root full);
+      V.app comp (#leaves full);
       case PTP.wait tp of
-        NONE => NSA.sub (nsa, 0)
+        NONE => (print "here\n"; NSA.sub (nsa, 0))
       | SOME e => PolyML.Exception.reraise e
     end
 
@@ -483,14 +576,18 @@ struct
     else
       Int.min (j, Thread.Thread.numProcessors ())
 
-  fun compile { depsFirst, jobs, logger } dag =
+  fun compile { cache, depsFirst, jobs, logger } dag =
     let
       val jobs = numJobs jobs
+      val cm = CM.new (cache, logger, dag)
     in
-      (case (jobs, depsFirst) of
-        (1, true) => serialDeps
-      | (1, _)    => serialEncounter
-      | (n, true) => parDeps n
-      | (n, _)    => parConc n) (logger, NSA.new (dag, jobs > 1), dag)
+      case CM.fetch (cm, 0) of
+        SOME ns => ns
+      | NONE =>
+          (case (jobs, depsFirst) of
+            (1, true) => serialDeps
+          | (1, _)    => serialEncounter
+          | (n, true) => parDeps n
+          | (n, _)    => parConc n) (cm, logger, NSA.new (dag, jobs > 1), dag)
   end
 end
