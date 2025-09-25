@@ -166,6 +166,37 @@ sig
   end
 
   val globalNameSpace : NameSpace.nameSpace
+  structure SaveState:
+  sig
+    val saveState : string -> unit
+    val loadState : string -> unit
+    val saveChild : string * int -> unit
+    val renameParent : {child: string, newParent: string} -> unit
+    val showHierarchy : unit -> string list
+    val showParent : string -> string option
+    val loadHierarchy : string list -> unit
+    structure Tags:
+    sig
+      val fixityTag : (string * NameSpace.Infixes.fixity) Universal.tag
+      val functorTag : (string * NameSpace.Functors.functorVal) Universal.tag
+      val signatureTag : (string * NameSpace.Signatures.signatureVal) Universal.tag
+      val structureTag : (string * NameSpace.Structures.structureVal) Universal.tag
+      val typeTag : (string * NameSpace.TypeConstrs.typeConstr) Universal.tag
+      val valueTag : (string * NameSpace.Values.value) Universal.tag
+      val startupTag : (unit -> unit) Universal.tag
+    end
+    val loadModule : string -> unit
+    val loadModuleBasic : string -> Universal.universal list
+    val saveModule :
+        string
+      * { functors : string list
+        , onStartup : (unit -> unit) option
+        , sigs : string list
+        , structs : string list
+        }
+      -> unit
+    val saveModuleBasic : string * Universal.universal list -> unit
+  end
 
   structure Compiler :
   sig
@@ -276,6 +307,7 @@ sig
   val getUseFileName : unit -> string option
   val suffixes : string list ref
   val export : string * (unit -> unit) -> unit
+  val makestring : 'a -> string
 end =
 struct
 end
