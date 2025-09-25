@@ -9,11 +9,13 @@ structure TIO = TextIO
 datatype cmd = CompileLink | Compile | SmlLib
 
 type opts =
-  { cmd      : cmd
+  { cache    : string
+  , cmd      : cmd
   , defAnns  : P.Ann.t list
   , depsf    : bool
   , disAnns  : P.Ann.t list
   , file     : string
+  , incr     : bool
   , jobs     : int
   , main     : string
   , out      : string
@@ -55,11 +57,13 @@ local
 , "OPTIONS"
 , "   -ann <ann>                     Wrap FILE with the given annotation"
 , "-c -compile                       Compile but do not link"
+, "   -cache <dir>                   Cache directory for incremental compilation"
 , "   -default-ann <ann>             Set annotation default"
 , "   -deps-first                    Ensure MLB files will only be compiled after"
 , "                                  their dependencies"
 , "   -disable-ann <ann>             Disable the given annotation"
 , "-h -help                          Print help usage"
+, "-I -incremental                   Enable incremental compilation"
 , "   -info                          Print advanced information"
 , "   -ignore-call-main              Equivalent to -ann 'ignoreFiles call-main.sml'"
 , "   -ignore-main                   Equivalent to -ann 'ignoreFiles main.sml'"
@@ -96,11 +100,13 @@ local
   end
 
   val d =
-    { cmd      = ref CompileLink
+    { cache    = ref ".polymlb"
+    , cmd      = ref CompileLink
     , defAnns  = ref ([] : P.Ann.t list)
     , depsf    = ref false
     , disAnns  = ref ([] : P.Ann.t list)
     , file     = ref ""
+    , incr     = ref false
     , jobs     = ref 1
     , main     = ref "main"
     , out      = ref ""
@@ -187,11 +193,14 @@ in
                 "--" => ((#file d := hd xs) handle Empty => usage ())
               | "-ann" => l := ann (#rootAnns, "-ann") xs
               | "-c" => #cmd d := Compile
+              | "-cache" => l := set (xs, "-cache", #cache, SOME)
               | "-default-ann" => l := ann (#defAnns, "default-ann") xs
               | "-deps-first" => #depsf d := true
               | "-disable-ann" => l := annName (#disAnns, "disable-ann") xs
               | "-h" => help ()
               | "-help" => help ()
+              | "-I" => #incr d := true
+              | "-incremental" => #incr d := true
               | "-info" => info ()
               | "-ignore-call-main" =>
                   #rootAnns d := P.Ann.IgnoreFiles ["call-main.sml"]
@@ -237,11 +246,13 @@ in
           !(#out d)
 
       val opts as { file, ... } : opts =
-        { cmd      = !(#cmd d)
+        { cache    = !(#cache d)
+        , cmd      = !(#cmd d)
         , defAnns  = !(#defAnns d)
         , depsf    = !(#depsf d)
         , disAnns  = !(#disAnns d)
         , file     = !(#file d)
+        , incr     = !(#incr d)
         , jobs     = !(#jobs d)
         , main     = !(#main d)
         , out      = out
@@ -313,8 +324,9 @@ local
         p
     end
 
-  fun o2o ({ defAnns, depsf, disAnns, jobs, pathMap, rootAnns, verbose, ... } : opts) =
+  fun o2o ({ cache, defAnns, depsf, disAnns, incr, jobs, pathMap, rootAnns, verbose, ... } : opts) =
     let
+      val log = { pathFmt = fmt, print = log verbose }
       val l =
         [ P.PathMap pathMap
         , P.Concurrency { depsFirst = depsf, jobs = jobs }
@@ -324,7 +336,7 @@ local
         if verbose = 0 then
           l
         else
-          P.Logger { pathFmt = fmt, print = log verbose } :: l
+          P.Logger log :: l
       val l =
         P.Preprocess
           (fn { bas, root = true, ... } =>
@@ -336,6 +348,13 @@ local
             | { bas, ... } =>
               if null defAnns then bas else [P.Basis.Ann (defAnns, bas)])
         :: l
+      val l =
+        if incr then
+          (P.Cache o P.Cache.fileSys)
+            { dir = cache, logger = if verbose = 0 then NONE else SOME log }
+          :: l
+        else
+          l
     in
       l
     end
