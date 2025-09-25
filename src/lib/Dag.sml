@@ -292,7 +292,8 @@ struct
                 val z =
                   { id   = p
                   , bas  = ds
-                  , deps = V.tabulate (B.cnt d, fn i => B.sub (paths, i))
+                  , deps = V.tabulate
+                      (B.cnt d, fn i => B.sub (paths, B.sub (d, i)))
                   }
               in
                 (* If already dirty, update the cache. *)
