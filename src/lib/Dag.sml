@@ -306,7 +306,7 @@ struct
                   D.set (dirty, id)
                 else
                   ();
-                Log.log log Log.Trace (fn fmt =>
+                Log.log log Log.Debug (fn fmt =>
                   fmt p ^ (if D.sub (dirty, id) then ": dirty" else ": clean"))
               end;
           (* Return the id. *)
