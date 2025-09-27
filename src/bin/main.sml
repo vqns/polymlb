@@ -187,6 +187,7 @@ in
                 "--" => ((#file d := hd xs) handle Empty => usage ())
               | "-ann" => l := ann (#rootAnns, "-ann") xs
               | "-c" => #cmd d := Compile
+              | "-compile" => #cmd d := Compile
               | "-default-ann" => l := ann (#defAnns, "default-ann") xs
               | "-deps-first" => #depsf d := true
               | "-disable-ann" => l := annName (#disAnns, "disable-ann") xs
