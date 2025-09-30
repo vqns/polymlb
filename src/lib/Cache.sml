@@ -290,7 +290,8 @@ struct
         fun load (kind, tag) (id, file) =
           let
             fun bad m =
-              ( err (fn fmt => fmt file ^ ": could not load module: " ^ m)
+              ( err (fn fmt => concat
+                  [fmt id, ": could not load module ", fmt file, ": ", m])
               ; NONE
               )
           in
@@ -310,7 +311,10 @@ struct
           ; (true before
               PS.saveModuleBasic (file, [U.tagInject tag v])
               handle e => false before err
-                (fn fmt => fmt file ^ ": could not save module: " ^ exnMessage e))
+                (fn fmt => concat
+                  [ fmt id, ": could not save module ", fmt file, ": "
+                  , exnMessage e
+                  ]))
             andalso
               (trc (fn fmt => concat (fmt file :: ": " :: modInfo file)); true)
           )

@@ -216,6 +216,8 @@ struct
   structure S = Set
   structure M = Matrix
 
+  fun strCpy s = CharVector.tabulate (size s, fn i => String.sub (s, i))
+
   fun index (l, s) =
     let
       fun idx ([], _) = ~1
@@ -293,7 +295,7 @@ struct
                   { id   = p
                   , bas  = ds
                   , deps = V.tabulate
-                      (B.cnt d, fn i => B.sub (paths, B.sub (d, i)))
+                      (B.cnt d, fn i => (strCpy o B.sub) (paths, B.sub (d, i)))
                   }
               in
                 (* If already dirty, update the cache. *)
