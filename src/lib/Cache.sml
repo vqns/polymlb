@@ -277,13 +277,24 @@ struct
 
         fun upd (h, m) (k, v) = (M.lock m; H.update (h, k, v); M.unlock m)
 
-        fun load tag file =
+        fun modInfo f =
+          let
+            val { moduleSignature = s, dependencies = d, ... } =
+              PS.getModuleInfo f
+          in
+              "sig = "
+            :: Word8Vector.foldr (fn (b, l) => Word8.toString b :: l) [] s
+            @ [", deps = [", String.concatWith ", " (map #1 d), "]"]
+          end
+
+        fun load (kind, tag) (id, file) =
           let
             fun bad m =
               ( err (fn fmt => fmt file ^ ": could not load module: " ^ m)
               ; NONE
               )
           in
+            dbg (fn fmt => concat [fmt id, ": loading ", kind, " from ", fmt file]);
             (case PS.loadModuleBasic file of
               [v] =>
                 if U.tagIs tag v then
@@ -294,22 +305,21 @@ struct
               handle e => bad (exnMessage e)
           end
 
-        fun save tag file v =
-          true before
-            (* Module id's seem to be the result of time(null); from time.h
-             * which likely has second precision.
-             *)
-            ( OS.Process.sleep (Time.fromSeconds 1)
-            ; PS.saveModuleBasic (file, [U.tagInject tag v])
-            )
-          handle e => false before
-            err (fn fmt => fmt file ^ ": could not save module: " ^ exnMessage e)
+        fun save (kind, tag) (id, file) v =
+          ( dbg (fn fmt => concat [fmt id, ": saving ", kind, " to ", fmt file])
+          ; (true before
+              PS.saveModuleBasic (file, [U.tagInject tag v])
+              handle e => false before err
+                (fn fmt => fmt file ^ ": could not save module: " ^ exnMessage e))
+            andalso
+              (trc (fn fmt => concat (fmt file :: ": " :: modInfo file)); true)
+          )
 
         fun loadDeps (id, file) =
           case (M.lock dm; H.sub (dss, id)) of
             SOME v => v before M.unlock dm
           | NONE =>
-               case load depsTag file of
+               case load ("deps", depsTag) (id, file) of
                 NONE => empty
               | SOME v =>
                   ( H.update (dss, id, v)
@@ -323,12 +333,10 @@ struct
             val bFile = file ^ ".bas"
             val dFile = file ^ ".deps"
           in
-            dbg (fn fmt => fmt id ^ ": saving bas to " ^ fmt bFile);
             upd (bss, bm) (id, bas);
-            save basTag bFile bas;
-            dbg (fn fmt => fmt id ^ ": saving deps to " ^ fmt dFile);
+            save ("bas", basTag) (id, bFile) bas;
             upd (dss, dm) (id, deps);
-            save depsTag dFile deps;
+            save ("deps", depsTag) (id, dFile) deps;
             ()
           end
 
@@ -341,17 +349,16 @@ struct
             dbg (fn fmt => fmt id ^ ": checking bas");
             M.lock bm;
             if
-              H.sub (bss, id) = SOME bas orelse load basTag bFile = SOME bas
+              H.sub (bss, id) = SOME bas
+                orelse load ("bas", basTag) (id, bFile) = SOME bas
             then
               (M.unlock bm; true)
             else
               ( H.update (bss, id, bas)
               ; M.unlock bm
-              ; dbg (fn fmt => fmt id ^ ": saving bas to " ^ fmt bFile)
-              ; save basTag bFile bas
+              ; save ("bas", basTag) (id, bFile) bas
               ; upd (dss, dm) (id, deps)
-              ; dbg (fn fmt => fmt id ^ ": saving deps to " ^ fmt dFile)
-              ; save depsTag dFile deps
+              ; save ("deps", depsTag) (id, dFile) deps
               ; false
               )
           end
@@ -366,13 +373,8 @@ struct
                 val dsFile = file ^ ".deps"
                 val nsFile = file ^ ".ns"
               in
-                trc (fn fmt => fmt id ^ ": loading deps from " ^ fmt dsFile);
                 (Vector.app (ignore o loadNs) o loadDeps) (id, dsFile);
-                trc (fn fmt => fmt id ^ ": loading ns from " ^ fmt nsFile);
-                (* Reload the module so that the namespace is in permanent space
-                 * and its revdeps can be exported while referencing its values.
-                 *)
-                case load nsTag nsFile of
+                case load ("ns", nsTag) (id, nsFile) of
                   NONE => NONE
                 | SOME ns => SOME ns before upd (nss, nm) (id, ns)
               end
@@ -380,15 +382,11 @@ struct
         fun saveNs (id, t, ns) =
           let
             val file = fname id ^ ".ns"
-            val () = dbg (fn fmt => fmt id ^ ": saving ns to " ^ fmt file)
-            val ns =
-              if save nsTag file ns then
-                case load nsTag file of
-                  NONE => ns
-                | SOME ns => ns before OS.FileSys.setTime (file, SOME t)
-              else
-                ns
           in
+            if save ("ns", nsTag) (id, file) ns then
+              OS.FileSys.setTime (file, SOME t)
+            else
+              ();
             upd (nss, nm) (id, ns);
             SOME ns
           end

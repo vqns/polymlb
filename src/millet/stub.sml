@@ -196,6 +196,17 @@ sig
         }
       -> unit
     val saveModuleBasic : string * Universal.universal list -> unit
+    val saveNamedModuleBasic :
+      { fileName : string
+      , moduleName : string
+      , contents : Universal.universal list
+      } -> unit
+    val showLoadedModules : unit -> (string * Word8Vector.vector) list
+    val getModuleInfo : string ->
+      { moduleName : string
+      , moduleSignature : Word8Vector.vector
+      , dependencies : (string * Word8Vector.vector) list
+      }
   end
 
   structure Compiler :
