@@ -187,7 +187,12 @@ struct
       ; BA.update (!r, i, true)
       )
 
-    fun vec (ref a, i) = BoolVector.tabulate (i, fn i => BA.sub (a, i))
+    fun vec (ref a, i) =
+      let
+        val sz = BA.length a
+      in
+        BoolVector.tabulate (i, fn i => i >= sz orelse BA.sub (a, i))
+      end
   end
 
   structure Matrix :>
@@ -240,7 +245,7 @@ struct
   datatype z = datatype Basis.dec
   datatype z = datatype Basis.exp
 
-  val baseSize = 10
+  val baseSize = 20
 
   (* Depth first so that any cycle found is the first one when reading
    * sequentially from the root.
@@ -249,7 +254,7 @@ struct
     let
       val bases : Basis.t B.t = B.new (baseSize * 2, [])
       val paths : string B.t = B.new (baseSize * 2, "")
-      val dirty = D.new (baseSize * 2)
+      val dirty = D.new baseSize
       val times : T.time B.t = B.new (baseSize * 2, T.now ())
       val mods  : T.time H.hash = H.hash (baseSize * 4)
       val ids   : int H.hash = H.hash (baseSize * 2)
