@@ -168,6 +168,7 @@ sig
   val globalNameSpace : NameSpace.nameSpace
   structure SaveState:
   sig
+    type moduleId = Word8Vector.vector
     val saveState : string -> unit
     val loadState : string -> unit
     val saveChild : string * int -> unit
@@ -185,8 +186,8 @@ sig
       val valueTag : (string * NameSpace.Values.value) Universal.tag
       val startupTag : (unit -> unit) Universal.tag
     end
-    val loadModule : string -> unit
-    val loadModuleBasic : string -> Universal.universal list
+    val loadModule : string -> moduleId
+    val loadModuleBasic : string -> Universal.universal list * moduleId
     val saveModule :
         string
       * { functors : string list
@@ -194,19 +195,23 @@ sig
         , sigs : string list
         , structs : string list
         }
-      -> unit
+      -> moduleId
+    val saveDependentModule :
+        string
+      * { functors : string list
+        , onStartup : (unit -> unit) option
+        , sigs : string list
+        , structs : string list
+        }
+      * (moduleId * string) list
+      -> moduleId
     val saveModuleBasic : string * Universal.universal list -> unit
-    val saveNamedModuleBasic :
-      { fileName : string
-      , moduleName : string
-      , contents : Universal.universal list
-      } -> unit
-    val showLoadedModules : unit -> (string * Word8Vector.vector) list
-    val getModuleInfo : string ->
-      { moduleName : string
-      , moduleSignature : Word8Vector.vector
-      , dependencies : (string * Word8Vector.vector) list
-      }
+    val saveDependentModuleBasic :
+        string * Universal.universal list * (moduleId * string) list
+      -> moduleId
+    val releaseModule : moduleId -> unit
+    val showLoadedModules : unit -> moduleId list
+    val getModuleInfo : string -> moduleId * (moduleId * string) list
   end
 
   structure Compiler :

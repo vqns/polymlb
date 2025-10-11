@@ -68,8 +68,9 @@ struct
   (* The fs based implementation is a little more involved.
    *
    * It acts as a two-level cache where values are stored and fetched through
-   * PolyML.SaveState.{load,save}ModuleBasic and also kept in memory in order
-   * to avoid excessive reloading.
+   * PolyML.SaveState.{load,save}DependentModuleBasic and also kept in memory
+   * in order to avoid excessive reloading. This means that, should saving to
+   * disk fail, it can still act as an in-memory cache.
    * Basis.t are stored in .bas files, dependencies in .deps files and
    * NameSpace.t in .ns files, with a single value in each file. The filename
    * for a given id is the unpadded ilename-safe (§5) base64 encoding of its
@@ -242,6 +243,7 @@ struct
   val nsTag   : NameSpace.t U.tag = U.tag ()
 
   val empty = Vector.fromList ([] : string list)
+  val sz = 10
 
   fun fileSys { log, dir } : t =
     let
@@ -268,24 +270,27 @@ struct
       end
 
       local
-        val bss : Basis.t H.hash = H.hash 10
-        val dss : string vector H.hash = H.hash 10
-        val nss : NameSpace.t H.hash = H.hash 10
+        val bss : Basis.t H.hash = H.hash sz
+        val dss : string vector H.hash = H.hash sz
+        val nss : NameSpace.t H.hash = H.hash sz
+        val ids : PS.moduleId H.hash = H.hash sz
         val bm = M.mutex ()
         val dm = M.mutex ()
         val nm = M.mutex ()
+        val im = M.mutex ()
 
         fun upd (h, m) (k, v) = (M.lock m; H.update (h, k, v); M.unlock m)
 
-        fun modInfo f =
+        val idToStr = Word8Vector.foldr (fn (b, l) => Word8.toString b :: l) []
+
+        fun modInfo fmt f =
           let
-            val { moduleSignature = s, dependencies = d, ... } =
-              PS.getModuleInfo f
+            val (s, d) = PS.getModuleInfo f
           in
-              "sig = "
-            :: Word8Vector.foldr (fn (b, l) => Word8.toString b :: l) [] s
-            @ [", deps = [", String.concatWith ", " (map #1 d), "]"]
+              "sig = " :: idToStr s
+            @ [", deps = [", String.concatWith ", " (map (fmt o #2) d), "]"]
           end
+          handle e => ["could not fetch mod info: ", exnMessage e]
 
         fun load (kind, tag) (id, file) =
           let
@@ -296,7 +301,7 @@ struct
               )
           in
             dbg (fn fmt => concat [fmt id, ": loading ", kind, " from ", fmt file]);
-            (case PS.loadModuleBasic file of
+            (case #1 (PS.loadModuleBasic file) of
               [v] =>
                 if U.tagIs tag v then
                   SOME (U.tagProject tag v)
@@ -306,30 +311,31 @@ struct
               handle e => bad (exnMessage e)
           end
 
-        fun save (kind, tag) (id, file) v =
-          ( dbg (fn fmt => concat [fmt id, ": saving ", kind, " to ", fmt file])
-          ; (true before
-              PS.saveModuleBasic (file, [U.tagInject tag v])
-              handle e => false before err
+        fun save (kind, tag) (id, file) deps v =
+          let
+            val _ = dbg (fn fmt => concat
+              ( [fmt id, ": saving ", kind, " to ", fmt file, " with deps: ["]
+              @ map (fn (id, n) => concat (idToStr id @ ["=", fmt n, ", "])) deps
+              @ ["]"]
+              ))
+            val r =
+              (SOME o PS.saveDependentModuleBasic) (file, [U.tagInject tag v], deps)
+              handle e => NONE  before err
                 (fn fmt => concat
                   [ fmt id, ": could not save module ", fmt file, ": "
                   , exnMessage e
-                  ]))
-            andalso
-              (trc (fn fmt => concat (fmt file :: ": " :: modInfo file)); true)
-          )
-
-        fun loadDeps (id, file) =
-          case (M.lock dm; H.sub (dss, id)) of
-            SOME v => v before M.unlock dm
-          | NONE =>
-               case load ("deps", depsTag) (id, file) of
-                NONE => empty
-              | SOME v =>
-                  ( H.update (dss, id, v)
-                  ; M.unlock dm
-                  ; v
-                  )
+                  ])
+          in
+            if isSome r then
+              trc (fn fmt => concat
+                ( [fmt file,": saved "]
+                @ idToStr (valOf r)
+                @ ": " :: modInfo fmt file)
+                )
+            else
+              ();
+            r
+          end
       in
         fun saveBas { id, bas, deps } =
           let
@@ -338,9 +344,9 @@ struct
             val dFile = file ^ ".deps"
           in
             upd (bss, bm) (id, bas);
-            save ("bas", basTag) (id, bFile) bas;
+            save ("bas", basTag) (id, bFile) [] bas;
             upd (dss, dm) (id, deps);
-            save ("deps", depsTag) (id, dFile) deps;
+            save ("deps", depsTag) (id, dFile) [] deps;
             ()
           end
 
@@ -360,9 +366,9 @@ struct
             else
               ( H.update (bss, id, bas)
               ; M.unlock bm
-              ; save ("bas", basTag) (id, bFile) bas
+              ; save ("bas", basTag) (id, bFile) [] bas
               ; upd (dss, dm) (id, deps)
-              ; save ("deps", depsTag) (id, dFile) deps
+              ; save ("deps", depsTag) (id, dFile) [] deps
               ; false
               )
           end
@@ -374,10 +380,8 @@ struct
               (* todo: need to keep track that it is currently being loaded *)
               let
                 val file = fname id
-                val dsFile = file ^ ".deps"
                 val nsFile = file ^ ".ns"
               in
-                (Vector.app (ignore o loadNs) o loadDeps) (id, dsFile);
                 case load ("ns", nsTag) (id, nsFile) of
                   NONE => NONE
                 | SOME ns => SOME ns before upd (nss, nm) (id, ns)
@@ -386,9 +390,29 @@ struct
         fun saveNs (id, t, ns) =
           let
             val file = fname id ^ ".ns"
+            val ok = ref true
+            fun bad m =
+              ( ok := false
+              ; err (fn fmt => fmt id ^ ": skipping export: " ^ m)
+              )
+            val deps =
+              case (M.lock dm; H.sub (dss, id) before M.unlock dm) of
+                NONE => (bad "could not find deps"; [])
+              | SOME v =>
+                  Vector.foldr
+                    (fn (d, l) =>
+                      case H.sub (ids, d) of
+                        NONE => (bad ("no module for " ^ d); l)
+                      | SOME z => (z, fname d ^ ".ns") :: l)
+                    [] v
           in
-            if save ("ns", nsTag) (id, file) ns then
-              OS.FileSys.setTime (file, SOME t)
+            if !ok then
+              case save ("ns", nsTag) (id, file) deps ns of
+                NONE => ()
+              | SOME r =>
+                  ( OS.FileSys.setTime (file, SOME t)
+                  ; upd (ids, im) (id, r)
+                  )
             else
               ();
             upd (nss, nm) (id, ns);

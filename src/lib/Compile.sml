@@ -307,7 +307,7 @@ struct
             let
               val p = V.sub (paths, id)
             in
-              L.log log L.Debug (fn fmt => "fetching " ^ fmt p ^ " from cache");
+              L.log log L.Debug (fn fmt => fmt p ^ ": fetching from cache");
               (fetch o V.sub) (paths, id)
             end
 
@@ -320,7 +320,7 @@ struct
             let
               val p = V.sub (paths, id)
             in
-              L.log log L.Debug (fn fmt => "caching " ^ fmt p);
+              L.log log L.Debug (fn fmt => fmt p ^ ": caching");
               case store (V.sub (paths, id), Time.now (), ns) of
                 SOME ns => ns
               | _ => ns
@@ -378,7 +378,7 @@ struct
   structure CM  = CacheManager
   structure NSA = NameSpaceArray
 
-  fun logElab log p = L.log log L.Info (fn fmt => "elaborating " ^ fmt p)
+  fun logElab log p = L.log log L.Info (fn fmt => fmt p ^ ": elaborating")
 
   (* Driver functions. *)
 
