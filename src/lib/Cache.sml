@@ -238,9 +238,11 @@ struct
     val fileName = base64 o sha1 o pad
   end
 
+  type mod = { id : string, ns : NameSpace.t }
+
   val basTag  : Basis.t U.tag = U.tag ()
   val depsTag : string vector U.tag = U.tag ()
-  val nsTag   : NameSpace.t U.tag = U.tag ()
+  val modTag  : mod U.tag = U.tag ()
 
   val empty = Vector.fromList ([] : string list)
   val sz = 10
@@ -297,23 +299,34 @@ struct
             fun bad m =
               ( err (fn fmt => concat
                   [fmt id, ": could not load module ", fmt file, ": ", m])
-              ; NONE
+              ; []
               )
           in
-            dbg (fn fmt => concat [fmt id, ": loading ", kind, " from ", fmt file]);
+            trc (fn fmt => concat [fmt id, ": loading ", kind, " from ", fmt file]);
             (case #1 (PS.loadModuleBasic file) of
-              [v] =>
+              [] => []
+            | l as (v::_) =>
                 if U.tagIs tag v then
-                  SOME (U.tagProject tag v)
+                  map (U.tagProject tag) l
                 else
-                  bad "tag mismatch"
-            | l => bad ("expected one value, found " ^ Int.toString (length l)))
+                  bad "tag mismatch")
               handle e => bad (exnMessage e)
           end
 
+        fun loadOne kt (id, file) =
+          case load kt (id, file) of
+            [v] => SOME v
+          | l =>
+              ( err (fn fmt => concat
+                  [ fmt id, ": bad module: ", fmt file
+                  , ": expected one value but found ", Int.toString (length l)
+                  ])
+              ; NONE
+              )
+
         fun save (kind, tag) (id, file) deps v =
           let
-            val _ = dbg (fn fmt => concat
+            val _ = trc (fn fmt => concat
               ( [fmt id, ": saving ", kind, " to ", fmt file, " with deps: ["]
               @ map (fn (id, n) => concat (idToStr id @ ["=", fmt n, ", "])) deps
               @ ["]"]
@@ -327,11 +340,7 @@ struct
                   ])
           in
             if isSome r then
-              trc (fn fmt => concat
-                ( [fmt file,": saved "]
-                @ idToStr (valOf r)
-                @ ": " :: modInfo fmt file)
-                )
+              dbg (fn fmt => concat (fmt file :: ": saved " :: modInfo fmt file))
             else
               ();
             r
@@ -360,7 +369,7 @@ struct
             M.lock bm;
             if
               H.sub (bss, id) = SOME bas
-                orelse load ("bas", basTag) (id, bFile) = SOME bas
+                orelse loadOne ("bas", basTag) (id, bFile) = SOME bas
             then
               (M.unlock bm; true)
             else
@@ -382,9 +391,20 @@ struct
                 val file = fname id
                 val nsFile = file ^ ".ns"
               in
-                case load ("ns", nsTag) (id, nsFile) of
-                  NONE => NONE
-                | SOME ns => SOME ns before upd (nss, nm) (id, ns)
+                case load ("ns", modTag) (id, nsFile) of
+                  [] => NONE
+                | l =>
+                    let
+                      val r : NameSpace.t option ref = ref NONE
+                    in
+                      app
+                        (fn { id = id', ns } =>
+                          ( upd (nss, nm) (id', ns)
+                          ; if id = id' then r := SOME ns else ()
+                          ))
+                        l;
+                      !r
+                    end
               end
 
         fun saveNs (id, t, ns) =
@@ -407,7 +427,7 @@ struct
                     [] v
           in
             if !ok then
-              case save ("ns", nsTag) (id, file) deps ns of
+              case save ("ns", modTag) (id, file) deps { id = id, ns = ns } of
                 NONE => ()
               | SOME r =>
                   ( OS.FileSys.setTime (file, SOME t)
