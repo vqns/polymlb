@@ -238,13 +238,18 @@ struct
     val fileName = base64 o sha1 o pad
   end
 
-  type mod = { id : string, ns : NameSpace.t }
+  type mod =
+    { id : string
+    , deps : (PS.moduleId * string) list
+    , ns : NameSpace.t
+    }
 
   val basTag  : Basis.t U.tag = U.tag ()
   val depsTag : string vector U.tag = U.tag ()
   val modTag  : mod U.tag = U.tag ()
 
   val empty = Vector.fromList ([] : string list)
+  val noId = Word8Vector.fromList []
   val sz = 10
 
   fun fileSys { log, dir } : t =
@@ -285,12 +290,14 @@ struct
 
         val idToStr = Word8Vector.foldr (fn (b, l) => Word8.toString b :: l) []
 
+        fun depsToStr fmt (l : (PS.moduleId * string) list) =
+          ["[", String.concatWith ", " (map fmt l), "]"]
+
         fun modInfo fmt f =
           let
             val (s, d) = PS.getModuleInfo f
           in
-              "sig = " :: idToStr s
-            @ [", deps = [", String.concatWith ", " (map (fmt o #2) d), "]"]
+            "sig: " :: idToStr s @ (", deps: " :: depsToStr (fmt o #2) d)
           end
           handle e => ["could not fetch mod info: ", exnMessage e]
 
@@ -299,15 +306,15 @@ struct
             fun bad m =
               ( err (fn fmt => concat
                   [fmt id, ": could not load module ", fmt file, ": ", m])
-              ; []
+              ; ([], noId)
               )
           in
             trc (fn fmt => concat [fmt id, ": loading ", kind, " from ", fmt file]);
-            (case #1 (PS.loadModuleBasic file) of
-              [] => []
-            | l as (v::_) =>
+            (case PS.loadModuleBasic file of
+              ([], z) => ([], z)
+            | (l as (v::_), z) =>
                 if U.tagIs tag v then
-                  map (U.tagProject tag) l
+                  (map (U.tagProject tag) l, z)
                 else
                   bad "tag mismatch")
               handle e => bad (exnMessage e)
@@ -315,32 +322,34 @@ struct
 
         fun loadOne kt (id, file) =
           case load kt (id, file) of
-            [v] => SOME v
-          | l =>
-              ( err (fn fmt => concat
-                  [ fmt id, ": bad module: ", fmt file
-                  , ": expected one value but found ", Int.toString (length l)
-                  ])
+            ([v], _) => SOME v
+          | (l, mId) =>
+              ( if mId <> noId then
+                  err (fn fmt => concat
+                    [ fmt id, ": bad module: ", fmt file
+                    , ": expected one value but found ", Int.toString (length l)
+                    ])
+                else
+                  ()
               ; NONE
               )
 
         fun save (kind, tag) (id, file) deps v =
           let
             val _ = trc (fn fmt => concat
-              ( [fmt id, ": saving ", kind, " to ", fmt file, " with deps: ["]
-              @ map (fn (id, n) => concat (idToStr id @ ["=", fmt n, ", "])) deps
-              @ ["]"]
+              ( [fmt id, ": saving ", kind, " to ", fmt file, " with deps: "]
+              @ depsToStr (fn (id, f) => concat (idToStr id @ [" = ", fmt f])) deps
               ))
             val r =
               (SOME o PS.saveDependentModuleBasic) (file, [U.tagInject tag v], deps)
-              handle e => NONE  before err
+              handle e => NONE before err
                 (fn fmt => concat
                   [ fmt id, ": could not save module ", fmt file, ": "
                   , exnMessage e
                   ])
           in
             if isSome r then
-              dbg (fn fmt => concat (fmt file :: ": saved " :: modInfo fmt file))
+              trc (fn fmt => concat (fmt file :: ": saved with " :: modInfo fmt file))
             else
               ();
             r
@@ -392,17 +401,19 @@ struct
                 val nsFile = file ^ ".ns"
               in
                 case load ("ns", modTag) (id, nsFile) of
-                  [] => NONE
-                | l =>
+                  ([], _) => NONE
+                | (l, z) =>
                     let
                       val r : NameSpace.t option ref = ref NONE
                     in
                       app
-                        (fn { id = id', ns } =>
+                        (fn { id = id', deps, ns } =>
                           ( upd (nss, nm) (id', ns)
+                          ; app (fn (mid, n) => upd (ids, dm) (n, mid)) deps
                           ; if id = id' then r := SOME ns else ()
                           ))
                         l;
+                      upd (ids, im) (id, z);
                       !r
                     end
               end
@@ -411,23 +422,25 @@ struct
           let
             val file = fname id ^ ".ns"
             val ok = ref true
+
             fun bad m =
               ( ok := false
               ; err (fn fmt => fmt id ^ ": skipping export: " ^ m)
               )
-            val deps =
+
+            val (deps, dIds) =
               case (M.lock dm; H.sub (dss, id) before M.unlock dm) of
-                NONE => (bad "could not find deps"; [])
+                NONE => (bad "could not find deps"; ([], []))
               | SOME v =>
                   Vector.foldr
-                    (fn (d, l) =>
-                      case H.sub (ids, d) of
-                        NONE => (bad ("no module for " ^ d); l)
-                      | SOME z => (z, fname d ^ ".ns") :: l)
-                    [] v
+                    (fn (d, (l1, l2)) =>
+                      case (loadNs d; H.sub (ids, d)) of
+                        SOME z => ((z, fname d ^ ".ns")::l1, (z, d)::l2)
+                      | NONE => (bad ("no module for " ^ d); (l1, l2)))
+                    ([], []) v
           in
             if !ok then
-              case save ("ns", modTag) (id, file) deps { id = id, ns = ns } of
+              case save ("ns", modTag) (id, file) deps { id = id, deps = dIds, ns = ns } of
                 NONE => ()
               | SOME r =>
                   ( OS.FileSys.setTime (file, SOME t)
