@@ -140,7 +140,7 @@ struct
           val t = ftype (s, exts, loc)
           val path =
             case Path.process m s of
-              Path.Path p => p
+              Path.Path p => OS.Path.mkCanonical p
             | Path.Unbound v => raise Validation (UnboundVariable, v, loc)
         in
           SOME (t, OS.Path.mkAbsolute { path = path, relativeTo = p })
